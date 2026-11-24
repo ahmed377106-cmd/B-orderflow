@@ -1,0 +1,164 @@
+'use strict';
+// صفحات HTML تُولَّد على الخادم للطباعة: الفاتورة الضريبية المبسطة وبوالص الشحن
+const { esc, egp, fmt, round2 } = require('./util');
+const { MARKETS, PLANS, GATEWAY_METHODS, COD, VAT } = require('./domain');
+const { generateQrSvg } = require('./qr');
+
+const CSS = `*{box-sizing:border-box}body{font:14px/1.7 Cairo,system-ui,sans-serif;margin:0;padding:24px;color:#082038;background:#F3F5FB}
+.sheet{max-width:760px;margin:0 auto 16px;background:#FFFFFF;border:1px solid #DCE5F2;border-radius:14px;padding:28px;position:relative}
+h1{margin:0 0 4px;font-size:22px}h2{margin:0;font-size:16px}.mu{color:#5C7089}.row{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse;margin:16px 0}th,td{padding:8px 10px;border-bottom:1px solid #DCE5F2;text-align:start}th{background:#E8EEF7}
+.tot td{font-weight:800;border-bottom:0}.btn{font:inherit;font-weight:700;border:0;border-radius:10px;background:#0C5CA4;color:#fff;padding:9px 20px;cursor:pointer}
+.labels{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:820px;margin:0 auto}.label{background:#fff;border:2px dashed #082038;border-radius:10px;padding:14px;break-inside:avoid}
+.label b.big{font-size:20px}.cod{margin-top:8px;padding:6px 10px;background:#071E38;color:#fff;border-radius:8px;font-weight:800;display:inline-block}
+.qr-box{border:1px solid #DCE5F2;border-radius:8px;padding:10px;background:#F3F5FB;text-align:center;display:inline-block}
+.stamp{border:2px dashed #0C5CA4;color:#0C5CA4;border-radius:8px;padding:6px 12px;font-weight:800;font-size:12px;display:inline-block}
+@media print{body{background:#fff;padding:0}.sheet{border:0;border-radius:0;padding:0;margin:0}.no-print{display:none!important}}`;
+
+const page = (title, body) => `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body>${body}<script src="/js/print.js"></script></body></html>`;
+const date = (iso) => new Date(iso).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Africa/Cairo' });
+
+function invoicePage(o, items, store) {
+  const preTax = round2(o.total / (1 + VAT));
+  const vat = round2(o.total - preTax);
+  const rows = items.length
+    ? items.map((i) => `<tr><td>${esc(i.name)}</td><td>${fmt(i.qty, 0)}</td><td>${egp(i.price)}</td><td>${egp(i.price * i.qty)}</td></tr>`).join('')
+    : `<tr><td colspan="4">${esc(o.items)}</td></tr>`;
+
+  const qrData = `${store.store_name}|${store.tax_id || 'N/A'}|${o.created_at}|${o.total}|${vat}`;
+  const qrSvg = generateQrSvg(qrData);
+
+  return page(`فاتورة تجارية مبسطة #${o.no}`, `
+<div class="sheet">
+  <div class="row" style="align-items:flex-start">
+    <div>
+      <h1>${esc(store.store_name)}</h1>
+      <div class="mu">${store.tax_id ? `الرقم الضريبي: <span dir="ltr"><b>${esc(store.tax_id)}</b></span>` : '<span class="stamp">فاتورة تجارية مبسطة</span>'}</div>
+      ${store.phone ? `<div class="mu">الهاتف: <span dir="ltr">${esc(store.phone)}</span></div>` : ''}
+    </div>
+    <div style="text-align:end">
+      <h2>فاتورة تجارية مبسطة</h2>
+      <div class="mu">رقم الفاتورة: #${fmt(o.no, 0).replace(/[٬,]/g, '')}</div>
+      <div class="mu">التاريخ: ${date(o.created_at)}</div>
+      <div style="margin-top:6px"><span class="stamp">جاهزة للطباعة والأرشفة</span></div>
+    </div>
+  </div>
+
+  <hr style="border:0;border-top:1px dashed #dce5f4;margin:16px 0">
+
+  <div class="row" style="align-items:center">
+    <div>
+      <div><b>العميل:</b> ${esc(o.customer)} — ${esc(o.gov)}${o.phone ? ` — <span dir="ltr">${esc(o.phone)}</span>` : ''}</div>
+      ${o.address ? `<div class="mu">العنوان: ${esc(o.address)}</div>` : ''}
+      <div class="mu">المنصة: <b>${esc(MARKETS[o.market]?.name || '')}</b> · الدفع: <b>${esc(o.pay)}</b> · الشحن: <b>${esc(o.courier)}</b></div>
+    </div>
+    <div class="qr-box">
+      ${qrSvg}
+      <div style="font-size:10px;font-weight:700;color:#0b5fd6;margin-top:4px">رمز التحقق QR</div>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>البيان</th><th>الكمية</th><th>سعر الوحدة</th><th>الإجمالي</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot>
+      <tr><td colspan="3">القيمة قبل الضريبة</td><td>${egp(preTax)}</td></tr>
+      <tr><td colspan="3">ضريبة القيمة المضافة (١٤٪)</td><td>${egp(vat)}</td></tr>
+      <tr class="tot"><td colspan="3">الإجمالي شامل الضريبة (EGP)</td><td><b>${egp(o.total)}</b></td></tr>
+    </tfoot>
+  </table>
+
+  <div class="row" style="margin-top:16px;align-items:center">
+    <p class="mu" style="font-size:12px;margin:0;max-width:500px">
+      فاتورة تجارية مبسطة لأغراض التوصيل والأرشفة الداخلية، والأسعار شاملة ضريبة القيمة المضافة (14%). إصدار الإيصالات الإلكترونية الرسمية على منظومة مصلحة الضرائب (ETA) يتم عبر بوابة التاجر الضريبية.
+    </p>
+    <button class="btn no-print" data-print>🖨️ طباعة / حفظ PDF</button>
+  </div>
+</div>`);
+}
+
+function awbPage(orders, store) {
+  const labels = orders.map((o) => `
+<div class="label">
+  <div class="row"><b class="big">#${fmt(o.no, 0).replace(/[٬,]/g, '')}</b><span>${esc(o.courier)}</span></div>
+  <div><b>${esc(o.customer)}</b>${o.phone ? ` — <span dir="ltr">${esc(o.phone)}</span>` : ''}</div>
+  <div>${esc(o.gov)}${o.address ? ` — ${esc(o.address)}` : ''}</div>
+  <div class="mu">${esc(o.items)}</div>
+  ${o.pay === COD ? `<div class="cod">المطلوب تحصيله: ${egp(o.total)}</div>` : '<div class="mu"><b>مدفوع مسبقًا</b></div>'}
+  <div class="mu" style="margin-top:6px">المرسل: ${esc(store.store_name)}</div>
+</div>`).join('');
+  return page('بوالص الشحن', `
+<div class="no-print" style="max-width:820px;margin:0 auto 12px"><button class="btn" data-print>🖨️ طباعة ${fmt(orders.length, 0)} بوليصة</button></div>
+${orders.length ? `<div class="labels">${labels}</div>` : '<div class="sheet"><h2>لا توجد طلبات قيد التجهيز حاليًا</h2><p class="mu">ستظهر هنا بوالص الطلبات الجديدة فور تسجيلها.</p></div>'}`);
+}
+
+function subscriptionReceiptPage(pay, store, platform = {}) {
+  const planName = (PLANS[pay.plan] || PLANS.pro).name;
+  const methodName = (GATEWAY_METHODS[pay.method] || GATEWAY_METHODS.card).name;
+  const cycleLabel = pay.cycle === 'yearly' ? 'اشتراك سنوي (١٢ شهرًا)' : 'اشتراك شهري (٣٠ يومًا)';
+  const preTax = round2(pay.amount - pay.vat);
+  const platformName = String(platform.platform_name || 'OrderFlow').trim() || 'OrderFlow';
+  const legalName = String(platform.platform_legal_name || platformName).trim() || platformName;
+  const platformTaxId = String(platform.platform_tax_id || '').trim();
+  const qrData = `${legalName}|${platformTaxId || 'N/A'}|${pay.tx_ref}|${pay.created_at}|${pay.amount}|${pay.vat}`;
+  const qrSvg = generateQrSvg(qrData);
+
+  return page(`إيصال دفع وفاتورة ضريبية للاشتراك #${pay.tx_ref}`, `
+<div class="sheet">
+  <div class="row" style="align-items:flex-start">
+    <div>
+      <h1>${esc(legalName)}</h1>
+      <div class="mu">${platformTaxId ? `الرقم الضريبي للمنصة: <span dir="ltr"><b>${esc(platformTaxId)}</b></span> · ` : ''}بوابة الدفع الإلكتروني الآمن</div>
+      <div class="mu">إلى المتجر المشترك: <b>${esc(store.store_name)}</b>${store.tax_id ? ` (ب.ض: <span dir="ltr">${esc(store.tax_id)}</span>)` : ''}</div>
+    </div>
+    <div style="text-align:end">
+      <h2>إيصال سداد اشتراك ضريبي (E-Receipt)</h2>
+      ${pay.receipt_no ? `<div class="mu">رقم الإيصال المتسلسل: <span dir="ltr"><b>OF-RCP-${String(pay.receipt_no).padStart(6, '0')}</b></span></div>` : ''}
+      <div class="mu">رقم العملية المرجعي: <span dir="ltr"><b>${esc(pay.tx_ref)}</b></span></div>
+      <div class="mu">تاريخ السداد: ${date(pay.created_at)}</div>
+      <div style="margin-top:6px"><span class="stamp" style="border-color:#087F72;color:#087F72">مدفوع ومفعَّل ✓</span></div>
+    </div>
+  </div>
+
+  <hr style="border:0;border-top:1px dashed #DCE5F2;margin:16px 0">
+
+  <div class="row" style="align-items:center">
+    <div>
+      <div><b>الباقة المفعّلة:</b> ${esc(planName)} — ${cycleLabel}</div>
+      <div class="mu"><b>وسيلة السداد:</b> ${esc(methodName)} ${pay.payer_info ? `(<span dir="ltr">${esc(pay.payer_info)}</span>)` : ''}</div>
+      <div class="mu"><b>فترة سريان الاشتراك:</b> من ${date(pay.period_start)} حتى ${date(pay.period_end)}</div>
+    </div>
+    <div class="qr-box">
+      ${qrSvg}
+      <div style="font-size:10px;font-weight:700;color:#0C5CA4;margin-top:4px">تحقق ضريبي QR</div>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>البيان</th><th>الدورة</th><th>القيمة قبل الخصم</th><th>الخصم</th><th>الصافي</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>${esc(planName)}</b> — اشتراك منصة ${esc(platformName)}</td>
+        <td>${cycleLabel}</td>
+        <td>${egp(round2(pay.amount + pay.discount))}</td>
+        <td>${pay.discount > 0 ? `− ${egp(pay.discount)} (${esc(pay.coupon)})` : '—'}</td>
+        <td><b>${egp(pay.amount)}</b></td>
+      </tr>
+    </tbody>
+    <tfoot>
+      <tr><td colspan="4">القيمة الخاضعة للضريبة (قبل ق.م)</td><td>${egp(preTax)}</td></tr>
+      <tr><td colspan="4">ضريبة القيمة المضافة (١٤٪ مشمولة)</td><td>${egp(pay.vat)}</td></tr>
+      <tr class="tot"><td colspan="4">الإجمالي المسدَّد عبر بوابة الدفع (EGP)</td><td><b>${egp(pay.amount)}</b></td></tr>
+    </tfoot>
+  </table>
+
+  <div class="row" style="margin-top:16px;align-items:center">
+    <p class="mu" style="font-size:12px;margin:0;max-width:500px">
+      تمت عملية الدفع بنجاح عبر شباك الدفع الإلكتروني المؤمّن لـ ${esc(legalName)}. يُعدّ هذا المستند إيصال سداد رسمي وفاتورة ضريبية مبسطة لاشتراك البرمجيات كخدمة (SaaS).
+    </p>
+    <button class="btn no-print" data-print>🖨️ طباعة / حفظ الإيصال PDF</button>
+  </div>
+</div>`);
+}
+
+module.exports = { invoicePage, awbPage, subscriptionReceiptPage, generateQrSvg };
